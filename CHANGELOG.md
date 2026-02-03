@@ -1,3 +1,7 @@
+## 1.1.1
+
+* Updated to use ds_easy_db_secure_storage
+
 ## 1.1.0
 
 * **Breaking** Switched from `encrypt` to `cryptography` package for WASM compatibility
