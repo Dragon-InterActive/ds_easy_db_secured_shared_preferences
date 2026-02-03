@@ -78,8 +78,8 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  ds_easy_db: ^1.0.1
-  ds_easy_db_secured_shared_preferences: ^1.0.0
+  ds_easy_db: ^1.0.2
+  ds_easy_db_secured_shared_preferences: ^1.1.0
 ```
 
 ## Usage
@@ -298,6 +298,56 @@ if (oldData != null) {
   }
 }
 ```
+
+## ⚠️ Migration from v1.0.0 to v1.0.1
+
+**Breaking Change**: Version 1.0.1 uses `cryptography` package instead of `encrypt` for WASM compatibility. Data encrypted with v1.0.0 **cannot** be decrypted by v1.0.1.
+
+### Migration Strategies
+
+**Option 1: Fresh Start (Recommended for Development)**
+
+```dart
+// Clear old encrypted data and start fresh
+await db.secure.delete('collection', 'id');
+// Re-enter or re-fetch data
+```
+
+**Option 2: Export & Re-encrypt (Production)**
+
+```dart
+// BEFORE updating to v1.0.1 (while still on v1.0.0):
+final oldData = await db.secure.getAll('user');
+// Save oldData to file or send to server temporarily
+
+// AFTER updating to v1.0.1:
+await db.secure.init();
+for (var entry in oldData.entries) {
+  await db.secure.set('user', entry.key, entry.value);
+}
+```
+
+**Option 3: Parallel Collections**
+
+```dart
+// Keep v1.0.0 data readable, new data in v1.0.1 format
+await oldDb.secure.get('settings_old', 'key');  // v1.0.0 format
+await newDb.secure.get('settings', 'key');      // v1.0.1 format
+```
+
+### Why This Breaking Change?
+
+✅ **WASM Compatibility**: Now works with `flutter build web --wasm`
+✅ **Better Performance**: Web Crypto API in browsers (up to 500 MB/s)
+✅ **Pure Dart**: No native dependencies, better cross-platform support
+✅ **Future-Proof**: Actively maintained with modern crypto standards
+✅ **Same Security**: Still AES-256-GCM encryption, just different implementation
+
+### When to Update?
+
+- **Development**: Update immediately, data loss is acceptable
+- **Production**: Plan migration window, inform users data must be re-synced
+- **New Projects**: Always use v1.0.1+
 
 ## Security Best Practices
 
