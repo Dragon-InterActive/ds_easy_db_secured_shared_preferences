@@ -79,7 +79,7 @@ Add to your `pubspec.yaml`:
 ```yaml
 dependencies:
   ds_easy_db: ^1.0.2
-  ds_easy_db_secured_shared_preferences: ^1.1.0
+  ds_easy_db_secured_shared_preferences: ^1.1.1
 ```
 
 ## Usage
@@ -299,9 +299,9 @@ if (oldData != null) {
 }
 ```
 
-## ⚠️ Migration from v1.0.0 to v1.0.1
+## ⚠️ Migration from v1.0.0 to v1.1.1
 
-**Breaking Change**: Version 1.0.1 uses `cryptography` package instead of `encrypt` for WASM compatibility. Data encrypted with v1.0.0 **cannot** be decrypted by v1.0.1.
+**Breaking Change**: Version 1.1.1 uses `cryptography` package instead of `encrypt` for WASM compatibility. Data encrypted with v1.0.0 **cannot** be decrypted by v1.1.1.
 
 ### Migration Strategies
 
@@ -316,11 +316,11 @@ await db.secure.delete('collection', 'id');
 **Option 2: Export & Re-encrypt (Production)**
 
 ```dart
-// BEFORE updating to v1.0.1 (while still on v1.0.0):
+// BEFORE updating to v1.1.1 (while still on v1.0.0):
 final oldData = await db.secure.getAll('user');
 // Save oldData to file or send to server temporarily
 
-// AFTER updating to v1.0.1:
+// AFTER updating to v1.1.1:
 await db.secure.init();
 for (var entry in oldData.entries) {
   await db.secure.set('user', entry.key, entry.value);
@@ -330,9 +330,9 @@ for (var entry in oldData.entries) {
 **Option 3: Parallel Collections**
 
 ```dart
-// Keep v1.0.0 data readable, new data in v1.0.1 format
+// Keep v1.0.0 data readable, new data in v1.1.1 format
 await oldDb.secure.get('settings_old', 'key');  // v1.0.0 format
-await newDb.secure.get('settings', 'key');      // v1.0.1 format
+await newDb.secure.get('settings', 'key');      // v1.1.1 format
 ```
 
 ### Why This Breaking Change?
@@ -347,7 +347,7 @@ await newDb.secure.get('settings', 'key');      // v1.0.1 format
 
 - **Development**: Update immediately, data loss is acceptable
 - **Production**: Plan migration window, inform users data must be re-synced
-- **New Projects**: Always use v1.0.1+
+- **New Projects**: Always use v1.1.1+
 
 ## Security Best Practices
 
@@ -415,7 +415,7 @@ If the encryption key is lost (e.g., after device reset), encrypted data cannot 
 
 BSD-3-Clause License - see LICENSE file for details.
 
-Copyright (c) 2025, MasterNemo (Dragon Software)
+Copyright (c) 2026, MasterNemo (Dragon Software)
 
 ---
 
