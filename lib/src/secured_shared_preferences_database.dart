@@ -1,8 +1,9 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:ds_easy_db/ds_easy_db.dart';
 import 'package:ds_easy_db_shared_preferences/ds_easy_db_shared_preferences.dart';
 import 'package:ds_easy_db_secure_storage/ds_easy_db_secure_storage.dart';
-import 'package:encrypt/encrypt.dart';
+import 'package:cryptography/cryptography.dart';
 
 /// AES-encrypted SharedPreferences implementation of [DatabaseRepository].
 ///
@@ -13,13 +14,15 @@ import 'package:encrypt/encrypt.dart';
 /// - AES-256-GCM encryption
 /// - Secure key storage via FlutterSecureStorage
 /// - Transparent encryption/decryption
-/// - Cross-platform support
+/// - Cross-platform support (including WASM)
+/// - Web Crypto API for better performance in browsers
 /// - Perfect balance between performance and security
 ///
 /// Example:
 /// ```dart
 /// db.configure(
-///   prefs: SecuredSharedPreferencesDatabase(),
+///   prefs: SharedPreferencesDatabase(),
+///   secure: SecuredSharedPreferencesDatabase(),
 ///   // ...
 /// );
 /// ```
@@ -27,11 +30,10 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
   final SharedPreferencesDatabase _storage;
   final SecureStorageDatabase _keyStorage;
 
-  late Encrypter _encrypter;
-  late IV _iv;
+  late SecretKey _secretKey;
+  late AesGcm _cipher;
 
   static const String _encryptionKeyId = '__ds_easy_db_encryption_key__';
-  static const String _encryptionIvId = '__ds_easy_db_encryption_iv__';
 
   /// Creates a new secured SharedPreferences database instance.
   ///
@@ -39,7 +41,9 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
   /// managing the encryption key.
   SecuredSharedPreferencesDatabase()
       : _storage = SharedPreferencesDatabase(),
-        _keyStorage = SecureStorageDatabase();
+        _keyStorage = SecureStorageDatabase() {
+    _cipher = AesGcm.with256bits();
+  }
 
   @override
   Future<void> init() async {
@@ -50,35 +54,48 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
     var keyData = await _keyStorage.get('system', _encryptionKeyId);
     if (keyData == null) {
       // Generate new key
-      final key = Key.fromSecureRandom(32);
-      final iv = IV.fromSecureRandom(16);
+      _secretKey = await _cipher.newSecretKey();
+      final keyBytes = await _secretKey.extractBytes();
 
       await _keyStorage.set('system', _encryptionKeyId, {
-        'key': base64.encode(key.bytes),
+        'key': base64.encode(keyBytes),
       });
-      await _keyStorage.set('system', _encryptionIvId, {
-        'iv': base64.encode(iv.bytes),
-      });
-
-      _encrypter = Encrypter(AES(key, mode: AESMode.gcm));
-      _iv = iv;
     } else {
       // Load existing key
-      final ivData = await _keyStorage.get('system', _encryptionIvId);
-      final key = Key(base64.decode(keyData['key']));
-      _iv = IV(base64.decode(ivData!['iv']));
-      _encrypter = Encrypter(AES(key, mode: AESMode.gcm));
+      final keyBytes = base64.decode(keyData['key']);
+      _secretKey = SecretKey(keyBytes);
     }
   }
 
-  String _encrypt(String plainText) {
-    final encrypted = _encrypter.encrypt(plainText, iv: _iv);
-    return encrypted.base64;
+  Future<String> _encrypt(String plainText) async {
+    final plainBytes = utf8.encode(plainText);
+
+    final secretBox = await _cipher.encrypt(plainBytes, secretKey: _secretKey);
+
+    // Combine nonce + ciphertext + mac into single base64 string
+    final combined = Uint8List.fromList([
+      ...secretBox.nonce,
+      ...secretBox.cipherText,
+      ...secretBox.mac.bytes,
+    ]);
+
+    return base64.encode(combined);
   }
 
-  String _decrypt(String encryptedText) {
-    final encrypted = Encrypted.fromBase64(encryptedText);
-    return _encrypter.decrypt(encrypted, iv: _iv);
+  Future<String> _decrypt(String encryptedText) async {
+    final combined = base64.decode(encryptedText);
+
+    // Extract nonce(12 bytes), ciphertext(remaining - 16), mac(last 16 bytes)
+    final nonce = combined.sublist(0, 12);
+    final mac = Mac(combined.sublist(combined.length - 16));
+    final cipherText = combined.sublist(12, combined.length - 16);
+
+    final secretBox = SecretBox(cipherText, nonce: nonce, mac: mac);
+
+    final decryptedBytes =
+        await _cipher.decrypt(secretBox, secretKey: _secretKey);
+
+    return utf8.decode(decryptedBytes);
   }
 
   @override
@@ -116,7 +133,7 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
 
     try {
       final encrypted = encryptedData['__encrypted__'] as String;
-      final decrypted = _decrypt(encrypted);
+      final decrypted = await _decrypt(encrypted);
       return jsonDecode(decrypted) as Map<String, dynamic>;
     } catch (e) {
       return defaultValue;
@@ -134,7 +151,7 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
     for (var entry in allEncrypted.entries) {
       try {
         final encrypted = entry.value['__encrypted__'] as String;
-        final decrypted = _decrypt(encrypted);
+        final decrypted = await _decrypt(encrypted);
         result[entry.key] = jsonDecode(decrypted);
       } catch (e) {
         // Skip corrupted entries
