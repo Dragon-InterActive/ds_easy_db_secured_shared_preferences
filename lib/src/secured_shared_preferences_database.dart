@@ -2,21 +2,37 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:ds_easy_db/ds_easy_db.dart';
 import 'package:ds_easy_db_shared_preferences/ds_easy_db_shared_preferences.dart';
-import 'package:ds_easy_db_secure_storage/ds_easy_db_secure_storage.dart';
 import 'package:cryptography/cryptography.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'key_store.dart';
 
 /// AES-encrypted SharedPreferences implementation of [DatabaseRepository].
 ///
 /// Combines SharedPreferences for storage with AES-256 encryption for security.
-/// The encryption key is stored securely using FlutterSecureStorage.
 ///
 /// Features:
 /// - AES-256-GCM encryption
-/// - Secure key storage via FlutterSecureStorage
 /// - Transparent encryption/decryption
 /// - Cross-platform support (including WASM)
 /// - Web Crypto API for better performance in browsers
-/// - Perfect balance between performance and security
+///
+/// Where the encryption key lives:
+/// - **Mobile / desktop**: platform secure storage (Keychain, KeyStore,
+///   Credential Manager, libsecret). Data survives app restarts.
+/// - **Web**: the tab's `sessionStorage`. Data survives a reload, but not
+///   closing the tab — afterwards it cannot be decrypted anymore. On the web
+///   key and data are both readable by anyone with access to the browser, so
+///   treat this as obfuscation, not as secure storage.
+///
+/// Whenever a new key has to be generated, entries encrypted with an earlier
+/// key are unreadable and are removed.
+///
+/// Encrypted entries use their own key namespace and never collide with a
+/// [SharedPreferencesDatabase] that uses the same collection names.
+///
+/// `DateTime` values (including [DatabaseRepository.serverTS]) are stored as
+/// ISO-8601 strings and come back as strings.
 ///
 /// Example:
 /// ```dart
@@ -27,84 +43,143 @@ import 'package:cryptography/cryptography.dart';
 /// );
 /// ```
 class SecuredSharedPreferencesDatabase implements DatabaseRepository {
-  final SharedPreferencesDatabase _storage;
-  final SecureStorageDatabase _keyStorage;
-
-  late SecretKey _secretKey;
-  late AesGcm _cipher;
-
-  static const String _encryptionKeyId = '__ds_easy_db_encryption_key__';
-
   /// Creates a new secured SharedPreferences database instance.
-  ///
-  /// Internally uses SharedPreferences for storage and SecureStorage for
-  /// managing the encryption key.
   SecuredSharedPreferencesDatabase()
       : _storage = SharedPreferencesDatabase(),
-        _keyStorage = SecureStorageDatabase() {
-    _cipher = AesGcm.with256bits();
-  }
+        _keyStore = createKeyStore();
 
+  final SharedPreferencesDatabase _storage;
+  final EncryptionKeyStore _keyStore;
+  final AesGcm _cipher = AesGcm.with256bits();
+
+  Future<SecretKey>? _secretKey;
+
+  /// Prefix of every collection this class writes into SharedPreferences.
+  static const String _namespace = '__ds_secured__:';
+
+  static const String _payloadField = '__encrypted__';
+
+  /// Loads or generates the encryption key. Called automatically on first use;
+  /// concurrent calls share one initialisation.
   @override
   Future<void> init() async {
     await _storage.init();
-    await _keyStorage.init();
+    await _key();
+  }
 
-    // Load or generate encryption key
-    var keyData = await _keyStorage.get('system', _encryptionKeyId);
-    if (keyData == null) {
-      // Generate new key
-      _secretKey = await _cipher.newSecretKey();
-      final keyBytes = await _secretKey.extractBytes();
-
-      await _keyStorage.set('system', _encryptionKeyId, {
-        'key': base64.encode(keyBytes),
-      });
-    } else {
-      // Load existing key
-      final keyBytes = base64.decode(keyData['key']);
-      _secretKey = SecretKey(keyBytes);
+  Future<SecretKey> _key() async {
+    final pending = _secretKey ??= _loadOrCreateKey();
+    try {
+      return await pending;
+    } catch (_) {
+      // Do not cache a failure: the next call gets a fresh attempt.
+      if (identical(_secretKey, pending)) _secretKey = null;
+      rethrow;
     }
   }
 
+  Future<SecretKey> _loadOrCreateKey() async {
+    final stored = await _keyStore.read();
+    if (stored != null) {
+      try {
+        final bytes = base64.decode(stored);
+        if (bytes.length == 32) return SecretKey(bytes);
+      } on FormatException {
+        // Fall through and replace the unusable key.
+      }
+    }
+
+    final key = await _cipher.newSecretKey();
+    // Whatever was encrypted before cannot be decrypted with the new key.
+    await _removeUnreadableEntries();
+    await _keyStore.write(base64.encode(await key.extractBytes()));
+    return key;
+  }
+
+  Future<void> _removeUnreadableEntries() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stale = prefs.getKeys().where((key) => key.startsWith(_namespace));
+    for (final key in stale.toList()) {
+      await prefs.remove(key);
+    }
+  }
+
+  String _collection(String collection) => '$_namespace$collection';
+
   Future<String> _encrypt(String plainText) async {
-    final plainBytes = utf8.encode(plainText);
+    final secretBox = await _cipher.encrypt(
+      utf8.encode(plainText),
+      secretKey: await _key(),
+    );
 
-    final secretBox = await _cipher.encrypt(plainBytes, secretKey: _secretKey);
-
-    // Combine nonce + ciphertext + mac into single base64 string
-    final combined = Uint8List.fromList([
+    // nonce (12 bytes) + ciphertext + mac (16 bytes), base64-encoded.
+    return base64.encode(Uint8List.fromList([
       ...secretBox.nonce,
       ...secretBox.cipherText,
       ...secretBox.mac.bytes,
-    ]);
-
-    return base64.encode(combined);
+    ]));
   }
 
   Future<String> _decrypt(String encryptedText) async {
     final combined = base64.decode(encryptedText);
 
-    // Extract nonce(12 bytes), ciphertext(remaining - 16), mac(last 16 bytes)
     final nonce = combined.sublist(0, 12);
     final mac = Mac(combined.sublist(combined.length - 16));
     final cipherText = combined.sublist(12, combined.length - 16);
 
-    final secretBox = SecretBox(cipherText, nonce: nonce, mac: mac);
-
-    final decryptedBytes =
-        await _cipher.decrypt(secretBox, secretKey: _secretKey);
+    final decryptedBytes = await _cipher.decrypt(
+      SecretBox(cipherText, nonce: nonce, mac: mac),
+      secretKey: await _key(),
+    );
 
     return utf8.decode(decryptedBytes);
   }
 
+  Map<String, dynamic> _resolveServerTimestamps(Map<String, dynamic> data) {
+    return data.map((key, value) {
+      if (value == DatabaseRepository.serverTS) {
+        return MapEntry(key, DateTime.now().toIso8601String());
+      }
+      return MapEntry(key, value);
+    });
+  }
+
+  String _encode(Map<String, dynamic> data) => jsonEncode(
+        data,
+        toEncodable: (value) => value is DateTime
+            ? value.toIso8601String()
+            : throw JsonUnsupportedObjectError(value),
+      );
+
+  /// Decrypts one stored entry, or returns `null` if it is not readable.
+  Future<Map<String, dynamic>?> _open(Object? stored) async {
+    if (stored is! Map) return null;
+    final payload = stored[_payloadField];
+    if (payload is! String) return null;
+    try {
+      final decoded = jsonDecode(await _decrypt(payload));
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _write(
+    String collection,
+    String id,
+    Map<String, dynamic> data,
+  ) async {
+    final encrypted = await _encrypt(_encode(data));
+    await _storage.set(_collection(collection), id, {_payloadField: encrypted});
+  }
+
   @override
   Future<void> set(
-      String collection, String id, Map<String, dynamic> data) async {
-    final jsonString = jsonEncode(data);
-    final encrypted = _encrypt(jsonString);
-
-    await _storage.set(collection, id, {'__encrypted__': encrypted});
+    String collection,
+    String id,
+    Map<String, dynamic> data,
+  ) async {
+    await _write(collection, id, _resolveServerTimestamps(data));
   }
 
   @override
@@ -113,12 +188,12 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
     String id,
     Map<String, dynamic> data,
   ) async {
-    // Get existing data
-    final existing = await get(collection, id) ?? {};
-    final updated = {...existing, ...data};
-
-    // Encrypt and save
-    await set(collection, id, updated);
+    final existing = await get(collection, id) ?? <String, dynamic>{};
+    await _write(
+      collection,
+      id,
+      {...existing, ..._resolveServerTimestamps(data)},
+    );
   }
 
   @override
@@ -127,44 +202,27 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
     String id, {
     dynamic defaultValue,
   }) async {
-    final encryptedData = await _storage.get(collection, id);
-
-    if (encryptedData == null) return defaultValue;
-
-    try {
-      final encrypted = encryptedData['__encrypted__'] as String;
-      final decrypted = await _decrypt(encrypted);
-      return jsonDecode(decrypted) as Map<String, dynamic>;
-    } catch (e) {
-      return defaultValue;
-    }
+    final stored = await _storage.get(_collection(collection), id);
+    return await _open(stored) ?? defaultValue;
   }
 
   @override
   Future<Map<String, dynamic>?> getAll(String collection) async {
-    final allEncrypted = await _storage.getAll(collection);
-
+    final allEncrypted = await _storage.getAll(_collection(collection));
     if (allEncrypted == null) return null;
 
-    final Map<String, dynamic> result = {};
-
-    for (var entry in allEncrypted.entries) {
-      try {
-        final encrypted = entry.value['__encrypted__'] as String;
-        final decrypted = await _decrypt(encrypted);
-        result[entry.key] = jsonDecode(decrypted);
-      } catch (e) {
-        // Skip corrupted entries
-        continue;
-      }
+    final result = <String, dynamic>{};
+    for (final entry in allEncrypted.entries) {
+      final document = await _open(entry.value);
+      if (document != null) result[entry.key] = document;
     }
-
     return result.isEmpty ? null : result;
   }
 
+  /// Whether a readable document exists under [id].
   @override
   Future<bool> exists(String collection, String id) async {
-    return await _storage.exists(collection, id);
+    return await get(collection, id) != null;
   }
 
   @override
@@ -178,27 +236,31 @@ class SecuredSharedPreferencesDatabase implements DatabaseRepository {
 
   @override
   Future<void> delete(String collection, String id) async {
-    await _storage.delete(collection, id);
+    await _storage.delete(_collection(collection), id);
   }
 
+  /// Returns the matching documents, each with its document id under `id`.
+  ///
+  /// A document that carries its own `id` field keeps it.
   @override
   Future<List<Map<String, dynamic>>> query(
     String collection, {
     Map<String, dynamic> where = const {},
   }) async {
     final all = await getAll(collection);
-
     if (all == null) return [];
 
-    final items = all.values.cast<Map<String, dynamic>>().toList();
+    return [
+      for (final entry in all.entries)
+        if (_matches(entry.value as Map<String, dynamic>, where))
+          <String, dynamic>{'id': entry.key, ...entry.value},
+    ];
+  }
 
-    if (where.isEmpty) return items;
-
-    return items.where((item) {
-      for (var entry in where.entries) {
-        if (item[entry.key] != entry.value) return false;
-      }
-      return true;
-    }).toList();
+  bool _matches(Map<String, dynamic> document, Map<String, dynamic> where) {
+    for (final entry in where.entries) {
+      if (document[entry.key] != entry.value) return false;
+    }
+    return true;
   }
 }

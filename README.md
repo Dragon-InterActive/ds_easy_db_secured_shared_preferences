@@ -32,13 +32,21 @@ AES-encrypted SharedPreferences implementation for [DSEasyDB](https://pub.dev/pa
 
 ## How It Works
 
-1. **First Run**: Generates a random AES-256 key and IV
+1. **First Run**: Generates a random AES-256 key (a fresh random nonce is used for every write)
 2. **Key Storage**:
    - **Mobile (iOS/Android)**: Key stored in platform-native secure storage (Keychain/KeyStore) ✅ Secure
    - **Desktop (macOS/Windows/Linux)**: Key stored in OS credential manager ✅ Secure
-   - **Web**: Key stored in LocalStorage ⚠️ **NOT truly secure** - just obfuscated
+   - **Web**: Key stored in the tab's `sessionStorage` ⚠️ **NOT truly secure** - just obfuscated
 3. **Data Write**: JSON → Encrypt with AES-256-GCM → Store in SharedPreferences
 4. **Data Read**: SharedPreferences → Decrypt with AES-256-GCM → JSON
+
+Encrypted entries live in their own key namespace (`__ds_secured__:`), so a
+`SharedPreferencesDatabase` using the same collection names never sees or
+overwrites them.
+
+If a new key ever has to be generated (key store wiped, new browser tab),
+entries encrypted with the old key can no longer be read and are removed
+automatically. `DateTime` values are stored as ISO-8601 strings.
 
 ## ⚠️ Web Security Limitation - READ THIS
 
@@ -46,12 +54,16 @@ AES-encrypted SharedPreferences implementation for [DSEasyDB](https://pub.dev/pa
 
 Here's why:
 
-- The encryption key is stored in browser **LocalStorage**
-- LocalStorage can be accessed by anyone with browser DevTools
+- The encrypted data lives in **localStorage**, the key in the tab's **sessionStorage**
+- Both can be read by anyone with browser DevTools
 - The encryption only protects against **casual inspection**, not determined attackers
-- Anyone with access to the browser can read the key and decrypt your data
+- Anyone with access to the browser tab can read the key and decrypt your data
 
-**Web is essentially "encrypted LocalStorage" - NOT secure storage!**
+**Session lifetime:** data survives a page reload, but **not** closing the
+tab or opening the app in a new tab. After that the key is gone, the data can
+no longer be decrypted and is removed on the next start.
+
+**Web is essentially "obfuscated, session-bound storage" - NOT secure storage!**
 
 ### For Production Web Apps
 
@@ -68,8 +80,8 @@ If you need real security on web, consider:
 
 - **Algorithm**: AES-256 in GCM mode
 - **Key Size**: 256 bits (32 bytes)
-- **IV Size**: 128 bits (16 bytes)
-- **Key Storage**: Platform-native secure storage (Keychain/KeyStore)
+- **Nonce Size**: 96 bits (12 bytes), random per write
+- **Key Storage**: Platform-native secure storage (Keychain/KeyStore); `sessionStorage` on web
 - **Authenticated Encryption**: GCM mode provides both confidentiality and integrity
 
 ## Installation
@@ -78,8 +90,8 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  ds_easy_db: ^1.0.2
-  ds_easy_db_secured_shared_preferences: ^1.1.1
+  ds_easy_db: ^1.1.1
+  ds_easy_db_secured_shared_preferences: ^1.2.0
 ```
 
 ## Usage
@@ -99,7 +111,7 @@ void main() async {
     prefs: SharedPreferencesDatabase(),  // Non-sensitive data
     secure: SecuredSharedPreferencesDatabase(),  // Sensitive data
     storage: MockDatabase(),
-    stream: MockDatabase(),
+    stream: MockStreamDatabase(),
   );
   
   await db.init();
@@ -130,14 +142,14 @@ class EasyDBConfig {
 
 ```dart
 // Non-sensitive app settings in prefs (unencrypted, faster)
-await db.prefs.set('settings', 'ui', {
+await db.prefs!.set('settings', 'ui', {
   'theme': 'dark',
   'language': 'en',
   'fontSize': 14,
 });
 
 // Sensitive user data in secure (encrypted)
-await db.secure.set('user', 'profile', {
+await db.secure!.set('user', 'profile', {
   'userId': '12345',
   'email': 'user@example.com',
   'phone': '+1234567890',
@@ -148,11 +160,11 @@ await db.secure.set('user', 'profile', {
 });
 
 // Read non-sensitive data (fast)
-final settings = await db.prefs.get('settings', 'ui');
+final settings = await db.prefs!.get('settings', 'ui');
 print('Theme: ${settings?['theme']}');
 
 // Read sensitive data (decrypted automatically)
-final profile = await db.secure.get('user', 'profile');
+final profile = await db.secure!.get('user', 'profile');
 print('Email: ${profile?['email']}');
 ```
 
@@ -160,25 +172,25 @@ print('Email: ${profile?['email']}');
 
 ```dart
 // Non-sensitive API config in prefs
-await db.prefs.set('config', 'api_public', {
+await db.prefs!.set('config', 'api_public', {
   'endpoint': 'https://api.example.com/v2',
   'timeout': 30,
   'retryAttempts': 3,
 });
 
 // Sensitive API credentials in secure
-await db.secure.set('config', 'api_credentials', {
+await db.secure!.set('config', 'api_credentials', {
   'clientId': 'your-client-id',
   'clientSecret': 'your-client-secret',
   'apiKey': 'sk-abc123xyz',
 });
 
 // Read public config
-final publicConfig = await db.prefs.get('config', 'api_public');
+final publicConfig = await db.prefs!.get('config', 'api_public');
 print('Endpoint: ${publicConfig?['endpoint']}');
 
 // Read credentials
-final credentials = await db.secure.get('config', 'api_credentials');
+final credentials = await db.secure!.get('config', 'api_credentials');
 print('Client ID: ${credentials?['clientId']}');
 ```
 
@@ -186,7 +198,7 @@ print('Client ID: ${credentials?['clientId']}');
 
 ```dart
 // Store session information in secure (encrypted)
-await db.secure.set('session', 'current', {
+await db.secure!.set('session', 'current', {
   'userId': 'user123',
   'sessionId': 'sess_abc123',
   'expiresAt': DateTime.now().add(Duration(days: 7)).toIso8601String(),
@@ -194,33 +206,33 @@ await db.secure.set('session', 'current', {
 });
 
 // Check session
-if (await db.secure.exists('session', 'current')) {
-  final session = await db.secure.get('session', 'current');
+if (await db.secure!.exists('session', 'current')) {
+  final session = await db.secure!.get('session', 'current');
   print('Active session for: ${session?['userId']}');
 }
 
 // Clear session on logout
-await db.secure.delete('session', 'current');
+await db.secure!.delete('session', 'current');
 ```
 
 ### Query Encrypted Data
 
 ```dart
 // Store multiple encrypted items in secure
-await db.secure.set('bookmarks', 'bm1', {
+await db.secure!.set('bookmarks', 'bm1', {
   'url': 'https://example.com',
   'title': 'Example Site',
   'private': true,
 });
 
-await db.secure.set('bookmarks', 'bm2', {
+await db.secure!.set('bookmarks', 'bm2', {
   'url': 'https://flutter.dev',
   'title': 'Flutter',
   'private': false,
 });
 
 // Query works transparently (data is decrypted automatically)
-final privateBookmarks = await db.secure.query('bookmarks',
+final privateBookmarks = await db.secure!.query('bookmarks',
   where: {'private': true}
 );
 print('Private bookmarks: ${privateBookmarks.length}');
@@ -230,14 +242,14 @@ print('Private bookmarks: ${privateBookmarks.length}');
 
 ```dart
 // Public feature flags in prefs (unencrypted)
-await db.prefs.set('features', 'public', {
+await db.prefs!.set('features', 'public', {
   'darkMode': true,
   'newUI': false,
   'apiVersion': 'v2',
 });
 
 // Sensitive feature flags in secure (encrypted)
-await db.secure.set('features', 'private', {
+await db.secure!.set('features', 'private', {
   'betaFeatures': true,
   'debugMode': false,
   'testUserId': 'test_123', // Sensitive test data
@@ -245,13 +257,13 @@ await db.secure.set('features', 'private', {
 });
 
 // Read public flags (fast)
-final publicFlags = await db.prefs.get('features', 'public');
+final publicFlags = await db.prefs!.get('features', 'public');
 if (publicFlags?['darkMode'] == true) {
   print('Dark mode enabled');
 }
 
 // Read private flags (decrypted)
-final privateFlags = await db.secure.get('features', 'private');
+final privateFlags = await db.secure!.get('features', 'private');
 if (privateFlags?['betaFeatures'] == true) {
   print('Beta features enabled');
 }
@@ -299,7 +311,12 @@ if (oldData != null) {
 }
 ```
 
-## ⚠️ Migration from v1.0.0 to v1.1.1
+## ⚠️ Migration from v1.0.0 to v1.1.x
+
+> **Note:** In versions 1.1.0 and 1.1.1 `set()` always threw an exception, so
+> no data could be written with them. Version 1.2.0 fixes this and stores
+> entries under a new key namespace. Upgrading from 1.1.x therefore loses
+> nothing.
 
 **Breaking Change**: Version 1.1.1 uses `cryptography` package instead of `encrypt` for WASM compatibility. Data encrypted with v1.0.0 **cannot** be decrypted by v1.1.1.
 
@@ -309,7 +326,7 @@ if (oldData != null) {
 
 ```dart
 // Clear old encrypted data and start fresh
-await db.secure.delete('collection', 'id');
+await db.secure!.delete('collection', 'id');
 // Re-enter or re-fetch data
 ```
 
@@ -317,13 +334,13 @@ await db.secure.delete('collection', 'id');
 
 ```dart
 // BEFORE updating to v1.1.1 (while still on v1.0.0):
-final oldData = await db.secure.getAll('user');
+final oldData = await db.secure!.getAll('user');
 // Save oldData to file or send to server temporarily
 
 // AFTER updating to v1.1.1:
-await db.secure.init();
+await db.secure!.init();
 for (var entry in oldData.entries) {
-  await db.secure.set('user', entry.key, entry.value);
+  await db.secure!.set('user', entry.key, entry.value);
 }
 ```
 
@@ -361,13 +378,13 @@ await newDb.secure.get('settings', 'key');      // v1.1.1 format
 
 ### Decryption Errors
 
+Reads never throw because of undecryptable data: an entry that cannot be
+decrypted (corrupted, or written with a lost key) is treated as missing.
+
 ```dart
-// If decryption fails, data might be corrupted
-try {
-  final data = await db.prefs.get('collection', 'id');
-} catch (e) {
-  // Handle decryption error - might need to regenerate key
-  print('Decryption failed: $e');
+final data = await db.secure!.get('collection', 'id');
+if (data == null) {
+  // Missing or unreadable - re-fetch or ask the user again.
 }
 ```
 
@@ -402,9 +419,10 @@ If the encryption key is lost (e.g., after device reset), encrypted data cannot 
 
 ### Web ⚠️ **NOT SECURE**
 
-- Key stored in **LocalStorage** (browser storage)
+- Key stored in the tab's **sessionStorage**, data in **localStorage**
 - Anyone with browser access can read the key
-- DevTools can access LocalStorage easily
+- DevTools can access both easily
+- Data survives a reload, but not closing the tab
 - Only protects against casual viewing
 - **Recommendation**:
   - DO NOT use for truly sensitive data on web!

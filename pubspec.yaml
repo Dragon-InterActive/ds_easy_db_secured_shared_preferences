@@ -1,6 +1,6 @@
 name: ds_easy_db_secured_shared_preferences
 description: "AES-encrypted SharedPreferences implementation for DSEasyDB. Combines the simplicity of SharedPreferences with AES-256 encryption for secure local storage."
-version: 1.1.1
+version: 1.2.0
 homepage: https://github.com/Dragon-InterActive/ds_easy_db_secured_shared_preferences
 license: BSD-3-Clause
 
@@ -9,14 +9,17 @@ environment:
   flutter: '>=3.35.1'
 
 dependencies:
-  ds_easy_db: ^1.0.2
-  ds_easy_db_shared_preferences: ^1.0.1
-  ds_easy_db_secure_storage: ^2.0.0
+  ds_easy_db: ^1.1.1
+  ds_easy_db_shared_preferences: ^1.1.0
+  ds_easy_db_secure_storage: ^2.1.0
   flutter:
     sdk: flutter
   cryptography: ^2.9.0
+  shared_preferences: ^2.5.3
+  web: ^1.1.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_secure_storage: ^10.0.0
   flutter_lints: ^6.0.0
